@@ -176,11 +176,10 @@ def _download_drive(file_id: str, dest: Path) -> bool:
 def _download_social_audio(url: str, dest: Path) -> tuple[bool, str]:
     try:
         import yt_dlp
-        import imageio_ffmpeg
-        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        raw_base = dest.parent / "source_audio"
         ydl_opts = {
             "format": "bestaudio[ext=m4a]/bestaudio/best",
-            "outtmpl": str(dest.with_suffix(".%(ext)s")),
+            "outtmpl": str(raw_base.with_suffix(".%(ext)s")),
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
@@ -189,19 +188,14 @@ def _download_social_audio(url: str, dest: Path) -> tuple[bool, str]:
             "retries": 2,
             "fragment_retries": 2,
             "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-            "ffmpeg_location": ffmpeg_bin,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "wav",
-                "preferredquality": "64",
-            }],
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        files = list(dest.parent.glob(dest.stem + "*.wav"))
+        files = [p for p in dest.parent.glob("source_audio.*") if p.is_file()]
         if not files:
-            return False, "file audio non creato"
-        files[0].replace(dest)
+            return False, "file audio sorgente non creato"
+        if not _extract_audio(files[0], dest):
+            return False, "conversione audio fallita"
         if not dest.exists() or dest.stat().st_size <= 10_000:
             return False, "file audio troppo piccolo"
         return True, ""
