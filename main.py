@@ -173,7 +173,7 @@ def _download_drive(file_id: str, dest: Path) -> bool:
     except Exception:
         return False
 
-def _download_social_audio(url: str, dest: Path) -> bool:
+def _download_social_audio(url: str, dest: Path) -> tuple[bool, str]:
     try:
         import yt_dlp
         ydl_opts = {
@@ -197,11 +197,13 @@ def _download_social_audio(url: str, dest: Path) -> bool:
             ydl.download([url])
         files = list(dest.parent.glob(dest.stem + "*.wav"))
         if not files:
-            return False
+            return False, "file audio non creato"
         files[0].replace(dest)
-        return dest.exists() and dest.stat().st_size > 10_000
-    except Exception:
-        return False
+        if not dest.exists() or dest.stat().st_size <= 10_000:
+            return False, "file audio troppo piccolo"
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)[:240]
 
 def _extract_audio(video: Path, audio: Path) -> bool:
     try:
@@ -368,10 +370,11 @@ async def analyze_url_stream(url: str, url_type: str) -> AsyncGenerator[str, Non
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "audio.wav"
             yield evt("download", f"Nessun sottotitolo trovato. Scaricando l'audio da {pname}...")
-            ok = await run_sync(_download_social_audio, url, audio)
+            ok, download_error = await run_sync(_download_social_audio, url, audio)
             if not ok:
                 yield evt("error",
                     f"Non riesco a scaricare l'audio da {pname}. "
+                    f"Dettaglio: {download_error or 'errore sconosciuto'}. "
                     "Se il video e privato, protetto o troppo grande, copia il testo nella tab Script.")
                 return
 
