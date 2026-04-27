@@ -176,6 +176,8 @@ def _download_drive(file_id: str, dest: Path) -> bool:
 def _download_social_audio(url: str, dest: Path) -> tuple[bool, str]:
     try:
         import yt_dlp
+        import imageio_ffmpeg
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
         ydl_opts = {
             "format": "bestaudio[ext=m4a]/bestaudio/best",
             "outtmpl": str(dest.with_suffix(".%(ext)s")),
@@ -187,6 +189,7 @@ def _download_social_audio(url: str, dest: Path) -> tuple[bool, str]:
             "retries": 2,
             "fragment_retries": 2,
             "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            "ffmpeg_location": ffmpeg_bin,
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "wav",
@@ -207,8 +210,10 @@ def _download_social_audio(url: str, dest: Path) -> tuple[bool, str]:
 
 def _extract_audio(video: Path, audio: Path) -> bool:
     try:
+        import imageio_ffmpeg
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
         r = subprocess.run(
-            ["ffmpeg", "-i", str(video), "-ar", "16000", "-ac", "1",
+            [ffmpeg_bin, "-i", str(video), "-ar", "16000", "-ac", "1",
              "-c:a", "pcm_s16le", str(audio), "-y", "-loglevel", "error"],
             capture_output=True,
             timeout=180,
