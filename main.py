@@ -12,6 +12,7 @@ import anthropic
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GROQ_KEY      = os.environ.get("GROQ_API_KEY", "")
 CLAUDE_MODEL  = os.environ.get("CLAUDE_MODEL", "claude-opus-4-6")
+GROQ_CHAT_MODEL = os.environ.get("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 APP_ENV       = os.environ.get("APP_ENV", "production").lower()
 IS_PROD       = APP_ENV not in {"dev", "development", "local", "test"}
 
@@ -225,12 +226,7 @@ def _transcribe(audio: Path) -> str:
 # ── AI Analysis ───────────────────────────────────────────────────────────────
 
 def _analyze(transcript: str) -> dict:
-    ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    resp = ai.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1024,
-        system="Sei un esperto coach di video marketing e contenuti digitali. Analizza trascrizioni e rispondi SOLO in JSON valido, senza testo aggiuntivo.",
-        messages=[{"role": "user", "content": f"""Analizza questa trascrizione e rispondi ESCLUSIVAMENTE con questo JSON:
+    prompt = f"""Analizza questa trascrizione e rispondi ESCLUSIVAMENTE con questo JSON:
 {{
   "score": <intero 1-10>,
   "commento": "<analisi 3-5 frasi: punti di forza, debolezze, chiarezza del messaggio, coinvolgimento>",
@@ -240,9 +236,10 @@ def _analyze(transcript: str) -> dict:
 Criteri: 9-10=eccellente, 7-8=buono, 5-6=sufficiente, 3-4=scarso, 1-2=molto scarso.
 
 TRASCRIZIONE:
-{transcript[:4000]}{"..." if len(transcript) > 4000 else ""}"""}],
-    )
-    raw = resp.content[0].text.strip()
+{transcript[:4000]}{"..." if len(transcript) > 4000 else ""}"""
+    raw = _call_anthropic(prompt)
+    if not raw:
+        raw = _call_groq_chat(prompt)
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if m:
         d = json.loads(m.group())
@@ -252,6 +249,46 @@ TRASCRIZIONE:
             "prompt":   str(d.get("prompt", "")).strip(),
         }
     return {"score": 0, "commento": "Analisi non disponibile.", "prompt": ""}
+
+
+def _call_anthropic(prompt: str) -> str:
+    if not ANTHROPIC_KEY:
+        return ""
+    try:
+        ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        resp = ai.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            system="Sei un esperto coach di video marketing e contenuti digitali. Analizza trascrizioni e rispondi SOLO in JSON valido, senza testo aggiuntivo.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as exc:
+        message = str(exc).lower()
+        if "credit balance" in message or "too low" in message or "billing" in message:
+            return ""
+        raise
+
+
+def _call_groq_chat(prompt: str) -> str:
+    if not GROQ_KEY:
+        raise RuntimeError("Nessuna API key AI disponibile per l'analisi.")
+    from groq import Groq
+    client = Groq(api_key=GROQ_KEY)
+    resp = client.chat.completions.create(
+        model=GROQ_CHAT_MODEL,
+        temperature=0.2,
+        max_tokens=1024,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "Sei un esperto coach di video marketing. Rispondi solo con JSON valido.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return resp.choices[0].message.content.strip()
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
