@@ -44,18 +44,18 @@ def _download_drive(file_id: str, dest: Path) -> bool:
 def _download_ytdlp(url: str, dest: Path) -> bool:
     try:
         import yt_dlp
-        base = str(dest.parent / "ytdl_video")
+        base = str(dest.parent / "ytdl_tmp")
         ydl_opts = {
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "format": "bestaudio/best",   # universally compatible — audio only
             "outtmpl": base + ".%(ext)s",
-            "merge_output_format": "mp4",
             "quiet": True,
             "no_warnings": True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        for f in dest.parent.iterdir():
-            if f.name.startswith("ytdl_video") and f != dest:
+        # find the file yt-dlp created (extension varies: webm, m4a, opus…)
+        for f in sorted(dest.parent.iterdir()):
+            if f.stem == "ytdl_tmp":
                 f.rename(dest)
                 break
         return dest.exists() and dest.stat().st_size > 1_000
