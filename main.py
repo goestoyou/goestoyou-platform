@@ -1,9 +1,9 @@
-import os, re, json, asyncio, tempfile, subprocess, glob, time
+import os, re, json, asyncio, tempfile, subprocess, glob
 from pathlib import Path
 from typing import Optional, AsyncGenerator
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -16,8 +16,6 @@ MAX_TEXT_CHARS   = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
 MAX_URL_CHARS    = int(os.environ.get("MAX_URL_CHARS", "2048"))
 MAX_DRIVE_MB     = int(os.environ.get("MAX_DRIVE_MB", "120"))
 TEXT_ANALYSIS_TIMEOUT = int(os.environ.get("TEXT_ANALYSIS_TIMEOUT", "60"))
-RATE_LIMIT_COUNT = int(os.environ.get("RATE_LIMIT_COUNT", "25"))
-RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "3600"))
 ALLOWED_ORIGINS = [
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
 ]
@@ -35,9 +33,6 @@ if ALLOWED_ORIGINS:
         allow_methods=["POST", "GET"],
         allow_headers=["Content-Type"],
     )
-
-_rate_buckets: dict[str, list[float]] = {}
-
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
@@ -57,21 +52,6 @@ async def security_headers(request: Request, call_next):
     if IS_PROD:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response
-
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
-def _check_rate_limit(key: str) -> None:
-    now = time.monotonic()
-    cutoff = now - RATE_LIMIT_WINDOW
-    hits = [t for t in _rate_buckets.get(key, []) if t > cutoff]
-    if len(hits) >= RATE_LIMIT_COUNT:
-        raise HTTPException(status_code=429, detail="Troppe richieste. Riprova piu tardi.")
-    hits.append(now)
-    _rate_buckets[key] = hits
-
 
 # ── URL Detection ─────────────────────────────────────────────────────────────
 
@@ -419,8 +399,7 @@ class AnalyzeReq(BaseModel):
         return cleaned
 
 @app.post("/api/analyze")
-async def analyze(req: AnalyzeReq, request: Request):
-    _check_rate_limit(_client_ip(request))
+async def analyze(req: AnalyzeReq):
     if req.input_type == "text":
         gen = analyze_text_stream(req.content)
     else:
