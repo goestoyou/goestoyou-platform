@@ -15,6 +15,7 @@ IS_PROD       = APP_ENV not in {"dev", "development", "local", "test"}
 MAX_TEXT_CHARS   = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
 MAX_URL_CHARS    = int(os.environ.get("MAX_URL_CHARS", "2048"))
 MAX_DRIVE_MB     = int(os.environ.get("MAX_DRIVE_MB", "120"))
+TEXT_ANALYSIS_TIMEOUT = int(os.environ.get("TEXT_ANALYSIS_TIMEOUT", "60"))
 RATE_LIMIT_COUNT = int(os.environ.get("RATE_LIMIT_COUNT", "25"))
 RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "3600"))
 ALLOWED_ORIGINS = [
@@ -305,7 +306,10 @@ async def analyze_text_stream(text: str) -> AsyncGenerator[str, None]:
     word_count = len(text.split())
     yield evt("analyze", f"Analizzando lo script ({word_count} parole)...")
     try:
-        analysis = await run_sync(_analyze, text)
+        analysis = await asyncio.wait_for(run_sync(_analyze, text), timeout=TEXT_ANALYSIS_TIMEOUT)
+    except asyncio.TimeoutError:
+        yield evt("error", "Analisi interrotta: limite massimo di 60 secondi superato.")
+        return
     except Exception as e:
         yield evt("error", f"Errore analisi AI: {e}")
         return
@@ -718,6 +722,7 @@ let currentUrlType = '';
 
 const STEP_IDS = { fetch:'sr-fetch', download:'sr-download', audio:'sr-audio', transcribe:'sr-transcribe', analyze:'sr-analyze' };
 const ALL_STEPS = ['fetch','download','audio','transcribe','analyze'];
+const TEXT_ANALYSIS_TIMEOUT_MS = 60000;
 const $ = id => document.getElementById(id);
 
 function setStep(key, state) {
@@ -842,9 +847,13 @@ async function startAnalysis() {
   prepareSteps();
   $('progress-msg').textContent = 'Avvio…';
 
+  let timeoutId = null;
   try {
+    const controller = new AbortController();
+    timeoutId = inputType === 'text' ? setTimeout(() => controller.abort(), TEXT_ANALYSIS_TIMEOUT_MS) : null;
     const res = await fetch('/api/analyze', {
       method:'POST', headers:{'Content-Type':'application/json'},
+      signal: controller.signal,
       body: JSON.stringify({ input_type:inputType, content }),
     });
     if (!res.ok) {
@@ -871,8 +880,14 @@ async function startAnalysis() {
         if(line.startsWith('data: ')){try{handleEvent(JSON.parse(line.slice(6)))}catch{}}
       }
     }
-  } catch(err){ showError('Errore di connessione: '+err.message); }
-  finally { $('btn-text').disabled=false; $('btn-link').disabled=false; }
+  } catch(err){
+    if (err.name === 'AbortError') showError('Analisi interrotta: limite massimo di 60 secondi superato.');
+    else showError('Errore di connessione: '+err.message);
+  }
+  finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    $('btn-text').disabled=false; $('btn-link').disabled=false;
+  }
 }
 
 function handleEvent({step,message,data}){
