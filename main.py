@@ -468,6 +468,19 @@ async def analyze_url_stream(url: str, url_type: str) -> AsyncGenerator[str, Non
             try:
                 transcript = await run_sync(_transcribe, audio)
             except Exception as e:
+                metadata_text = await run_sync(_fetch_video_metadata_text, url)
+                if metadata_text:
+                    word_count = len(metadata_text.split())
+                    yield evt("analyze", "Whisper non disponibile. Creo uno script virale dai metadata pubblici...")
+                    try:
+                        analysis = await run_sync(_analyze, metadata_text)
+                    except Exception as analysis_error:
+                        yield evt("error", f"Errore analisi: {analysis_error}")
+                        return
+                    yield evt("done", "Script virale creato dai metadata!", {
+                        "transcript": metadata_text, "word_count": word_count, **analysis
+                    })
+                    return
                 yield evt("error", f"Errore trascrizione: {e}")
                 return
 
