@@ -177,12 +177,16 @@ def _download_social_audio(url: str, dest: Path) -> bool:
     try:
         import yt_dlp
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
             "outtmpl": str(dest.with_suffix(".%(ext)s")),
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
             "max_filesize": MAX_SOCIAL_AUDIO_MB * 1_048_576,
+            "socket_timeout": 30,
+            "retries": 2,
+            "fragment_retries": 2,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "wav",
