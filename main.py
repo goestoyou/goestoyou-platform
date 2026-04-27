@@ -7,12 +7,8 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
-import anthropic
 
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GROQ_KEY      = os.environ.get("GROQ_API_KEY", "")
-CLAUDE_MODEL  = os.environ.get("CLAUDE_MODEL", "claude-opus-4-6")
-GROQ_CHAT_MODEL = os.environ.get("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 APP_ENV       = os.environ.get("APP_ENV", "production").lower()
 IS_PROD       = APP_ENV not in {"dev", "development", "local", "test"}
 
@@ -226,69 +222,67 @@ def _transcribe(audio: Path) -> str:
 # ── AI Analysis ───────────────────────────────────────────────────────────────
 
 def _analyze(transcript: str) -> dict:
-    prompt = f"""Analizza questa trascrizione e rispondi ESCLUSIVAMENTE con questo JSON:
-{{
-  "score": <intero 1-10>,
-  "commento": "<analisi 3-5 frasi: punti di forza, debolezze, chiarezza del messaggio, coinvolgimento>",
-  "prompt": "<prompt 4-6 frasi per migliorare il prossimo video sullo stesso argomento>"
-}}
+    text = re.sub(r"\s+", " ", transcript.strip())
+    words = re.findall(r"\b[\wÀ-ÿ']+\b", text.lower())
+    word_count = len(words)
+    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+    avg_sentence = word_count / max(1, len(sentences))
+    unique_ratio = len(set(words)) / max(1, word_count)
+    question_count = transcript.count("?")
+    hook_terms = {"oggi", "ecco", "perche", "perché", "scopri", "attenzione", "errore", "segreto", "come"}
+    action_terms = {"clicca", "commenta", "salva", "condividi", "scrivi", "prova", "guarda", "seguimi", "iscriviti"}
+    hook_hits = sum(1 for w in words[:40] if w in hook_terms)
+    action_hits = sum(1 for w in words[-80:] if w in action_terms)
 
-Criteri: 9-10=eccellente, 7-8=buono, 5-6=sufficiente, 3-4=scarso, 1-2=molto scarso.
+    score = 5
+    if 70 <= word_count <= 450:
+        score += 1
+    if 8 <= avg_sentence <= 24:
+        score += 1
+    if unique_ratio >= 0.45:
+        score += 1
+    if hook_hits:
+        score += 1
+    if question_count or action_hits:
+        score += 1
+    if word_count < 40:
+        score -= 2
+    if avg_sentence > 32:
+        score -= 1
+    score = max(1, min(10, score))
 
-TRASCRIZIONE:
-{transcript[:4000]}{"..." if len(transcript) > 4000 else ""}"""
-    raw = _call_anthropic(prompt)
-    if not raw:
-        raw = _call_groq_chat(prompt)
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if m:
-        d = json.loads(m.group())
-        return {
-            "score":    max(1, min(10, int(d.get("score", 5)))),
-            "commento": str(d.get("commento", "")).strip(),
-            "prompt":   str(d.get("prompt", "")).strip(),
-        }
-    return {"score": 0, "commento": "Analisi non disponibile.", "prompt": ""}
+    strengths = []
+    weaknesses = []
+    if hook_hits:
+        strengths.append("l'apertura contiene parole che aiutano ad agganciare l'attenzione")
+    else:
+        weaknesses.append("l'apertura puo essere piu incisiva nei primi secondi")
+    if 8 <= avg_sentence <= 24:
+        strengths.append("il ritmo delle frasi e abbastanza leggibile")
+    else:
+        weaknesses.append("le frasi sembrano troppo lunghe o troppo frammentate")
+    if action_hits:
+        strengths.append("c'e una call to action riconoscibile")
+    else:
+        weaknesses.append("manca una call to action chiara nel finale")
+    if unique_ratio >= 0.45:
+        strengths.append("il vocabolario e sufficientemente vario")
+    else:
+        weaknesses.append("alcuni termini si ripetono e possono rendere il messaggio meno dinamico")
 
-
-def _call_anthropic(prompt: str) -> str:
-    if not ANTHROPIC_KEY:
-        return ""
-    try:
-        ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        resp = ai.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=1024,
-            system="Sei un esperto coach di video marketing e contenuti digitali. Analizza trascrizioni e rispondi SOLO in JSON valido, senza testo aggiuntivo.",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
-    except Exception as exc:
-        message = str(exc).lower()
-        if "credit balance" in message or "too low" in message or "billing" in message:
-            return ""
-        raise
-
-
-def _call_groq_chat(prompt: str) -> str:
-    if not GROQ_KEY:
-        raise RuntimeError("Nessuna API key AI disponibile per l'analisi.")
-    from groq import Groq
-    client = Groq(api_key=GROQ_KEY)
-    resp = client.chat.completions.create(
-        model=GROQ_CHAT_MODEL,
-        temperature=0.2,
-        max_tokens=1024,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": "Sei un esperto coach di video marketing. Rispondi solo con JSON valido.",
-            },
-            {"role": "user", "content": prompt},
-        ],
+    commento = (
+        f"Il contenuto ottiene {score}/10: "
+        f"{'; '.join(strengths[:2]) if strengths else 'ha una base comprensibile'}. "
+        f"Da migliorare: {'; '.join(weaknesses[:2]) if weaknesses else 'rafforza ancora promessa e chiusura'}. "
+        f"Il testo conta circa {word_count} parole con frasi da {avg_sentence:.0f} parole in media, quindi lavora soprattutto su chiarezza, ritmo e invito finale."
     )
-    return resp.choices[0].message.content.strip()
+    prompt = (
+        "Riscrivi questo video con un hook piu forte nei primi 3 secondi, una promessa specifica e un esempio concreto. "
+        "Mantieni frasi brevi, elimina ripetizioni e organizza il messaggio in problema, soluzione e beneficio. "
+        "Chiudi con una call to action semplice e coerente con l'obiettivo del video. "
+        "Tono: diretto, naturale, utile, senza sembrare pubblicita forzata."
+    )
+    return {"score": score, "commento": commento, "prompt": prompt}
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -312,7 +306,7 @@ async def analyze_text_stream(text: str) -> AsyncGenerator[str, None]:
         yield evt("error", "Testo troppo corto. Inserisci almeno qualche frase.")
         return
     word_count = len(text.split())
-    yield evt("analyze", f"Analizzando lo script con Claude AI ({word_count} parole)...")
+    yield evt("analyze", f"Analizzando lo script ({word_count} parole)...")
     try:
         analysis = await run_sync(_analyze, text)
     except Exception as e:
@@ -340,7 +334,7 @@ async def analyze_url_stream(url: str, url_type: str) -> AsyncGenerator[str, Non
 
         if transcript:
             word_count = len(transcript.split())
-            yield evt("analyze", f"Analizzando con Claude AI ({word_count} parole)...")
+            yield evt("analyze", f"Analizzando il testo ({word_count} parole)...")
             try:
                 analysis = await run_sync(_analyze, transcript)
             except Exception as e:
@@ -387,7 +381,7 @@ async def analyze_url_stream(url: str, url_type: str) -> AsyncGenerator[str, Non
             return
 
         word_count = len(transcript.split())
-        yield evt("analyze", f"Analizzando con Claude AI ({word_count} parole)...")
+        yield evt("analyze", f"Analizzando il testo ({word_count} parole)...")
         try:
             analysis = await run_sync(_analyze, transcript)
         except Exception as e:
@@ -575,7 +569,7 @@ footer { text-align:center; padding:1.4rem; font-size:.74rem; color:#374151; bor
 
   <!-- INPUT -->
   <section id="input-section">
-    <p class="hero-eyebrow">Powered by Whisper + Claude AI</p>
+    <p class="hero-eyebrow">Powered by Whisper + Smart Scoring</p>
     <h1 class="hero-title">Valida la tua idea video</h1>
     <p class="hero-sub">Incolla lo script oppure il link del video — YouTube, TikTok, Instagram e altri.<br>Risultati in pochi secondi.</p>
 
@@ -656,7 +650,7 @@ footer { text-align:center; padding:1.4rem; font-size:.74rem; color:#374151; bor
       <div class="step-row pending" id="sr-analyze">
         <div class="step-dot">🤖</div>
         <div class="step-info">
-          <div class="step-name">Analisi Claude AI</div>
+          <div class="step-name">Analisi contenuto</div>
           <div class="step-detail">Voto, commento e prompt di miglioramento</div>
         </div>
         <span class="step-badge">In attesa</span>
@@ -718,7 +712,7 @@ footer { text-align:center; padding:1.4rem; font-size:.74rem; color:#374151; bor
 
 </main>
 
-<footer>GoesToYou.video · Sottotitoli istantanei + Claude AI · Analisi video rapida</footer>
+<footer>GoesToYou.video · Sottotitoli istantanei + Smart Scoring · Analisi video rapida</footer>
 
 <script>
 let resultData  = null;
