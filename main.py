@@ -15,7 +15,7 @@ IS_PROD       = APP_ENV not in {"dev", "development", "local", "test"}
 MAX_TEXT_CHARS   = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
 MAX_URL_CHARS    = int(os.environ.get("MAX_URL_CHARS", "2048"))
 MAX_DRIVE_MB     = int(os.environ.get("MAX_DRIVE_MB", "120"))
-RATE_LIMIT_COUNT = int(os.environ.get("RATE_LIMIT_COUNT", "10"))
+RATE_LIMIT_COUNT = int(os.environ.get("RATE_LIMIT_COUNT", "25"))
 RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "3600"))
 ALLOWED_ORIGINS = [
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
@@ -59,9 +59,6 @@ async def security_headers(request: Request, call_next):
 
 
 def _client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip()
     return request.client.host if request.client else "unknown"
 
 
