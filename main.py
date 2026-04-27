@@ -15,6 +15,7 @@ IS_PROD       = APP_ENV not in {"dev", "development", "local", "test"}
 MAX_TEXT_CHARS   = int(os.environ.get("MAX_TEXT_CHARS", "12000"))
 MAX_URL_CHARS    = int(os.environ.get("MAX_URL_CHARS", "2048"))
 MAX_DRIVE_MB     = int(os.environ.get("MAX_DRIVE_MB", "120"))
+MAX_SOCIAL_AUDIO_MB = int(os.environ.get("MAX_SOCIAL_AUDIO_MB", "80"))
 TEXT_ANALYSIS_TIMEOUT = int(os.environ.get("TEXT_ANALYSIS_TIMEOUT", "60"))
 ALLOWED_ORIGINS = [
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
@@ -172,6 +173,32 @@ def _download_drive(file_id: str, dest: Path) -> bool:
     except Exception:
         return False
 
+def _download_social_audio(url: str, dest: Path) -> bool:
+    try:
+        import yt_dlp
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(dest.with_suffix(".%(ext)s")),
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "max_filesize": MAX_SOCIAL_AUDIO_MB * 1_048_576,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+                "preferredquality": "64",
+            }],
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        files = list(dest.parent.glob(dest.stem + "*.wav"))
+        if not files:
+            return False
+        files[0].replace(dest)
+        return dest.exists() and dest.stat().st_size > 10_000
+    except Exception:
+        return False
+
 def _extract_audio(video: Path, audio: Path) -> bool:
     try:
         r = subprocess.run(
@@ -185,16 +212,24 @@ def _extract_audio(video: Path, audio: Path) -> bool:
         return False
 
 def _transcribe(audio: Path) -> str:
+    if not GROQ_KEY:
+        raise RuntimeError("GROQ_API_KEY mancante: serve una chiave Groq valida per trascrivere video senza sottotitoli.")
     from groq import Groq
-    client = Groq(api_key=GROQ_KEY)
-    with open(audio, "rb") as f:
-        result = client.audio.transcriptions.create(
-            model="whisper-large-v3-turbo",
-            file=("audio.wav", f, "audio/wav"),
-            language="it",
-            response_format="text",
-        )
-    return str(result).strip()
+    try:
+        client = Groq(api_key=GROQ_KEY)
+        with open(audio, "rb") as f:
+            result = client.audio.transcriptions.create(
+                model="whisper-large-v3-turbo",
+                file=("audio.wav", f, "audio/wav"),
+                language="it",
+                response_format="text",
+            )
+        return str(result).strip()
+    except Exception as exc:
+        message = str(exc)
+        if "invalid_api_key" in message.lower() or "invalid api key" in message.lower():
+            raise RuntimeError("GROQ_API_KEY non valida: aggiorna la chiave Groq su Railway per trascrivere video senza sottotitoli.") from exc
+        raise
 
 
 # ── AI Analysis ───────────────────────────────────────────────────────────────
@@ -325,10 +360,39 @@ async def analyze_url_stream(url: str, url_type: str) -> AsyncGenerator[str, Non
                 "transcript": transcript, "word_count": word_count, **analysis
             })
             return
-        else:
-            yield evt("error",
-                f"Nessun sottotitolo disponibile su {pname}. "
-                "Copia il testo del video nella tab 📝 Script per analizzarlo.")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "audio.wav"
+            yield evt("download", f"Nessun sottotitolo trovato. Scaricando l'audio da {pname}...")
+            ok = await run_sync(_download_social_audio, url, audio)
+            if not ok:
+                yield evt("error",
+                    f"Non riesco a scaricare l'audio da {pname}. "
+                    "Se il video e privato, protetto o troppo grande, copia il testo nella tab Script.")
+                return
+
+            size_mb = audio.stat().st_size / 1_048_576
+            yield evt("transcribe", f"Trascrivendo l'audio con Whisper ({size_mb:.1f} MB)...")
+            try:
+                transcript = await run_sync(_transcribe, audio)
+            except Exception as e:
+                yield evt("error", f"Errore trascrizione: {e}")
+                return
+
+            word_count = len(transcript.split())
+            if word_count < 5:
+                yield evt("error", "Trascrizione troppo corta. Copia il testo del video nella tab Script.")
+                return
+
+            yield evt("analyze", f"Analizzando il testo ({word_count} parole)...")
+            try:
+                analysis = await run_sync(_analyze, transcript)
+            except Exception as e:
+                yield evt("error", f"Errore analisi: {e}")
+                return
+            yield evt("done", "Analisi completata!", {
+                "transcript": transcript, "word_count": word_count, **analysis
+            })
             return
 
     # ── SLOW PATH: Google Drive → download + Whisper ──────────────────────────
