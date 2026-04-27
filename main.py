@@ -1,7 +1,8 @@
-import os, re, json, asyncio, tempfile, subprocess, glob
+import os, re, json, asyncio, tempfile, subprocess, glob, time
 from pathlib import Path
 from typing import Optional, AsyncGenerator
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
+from urllib.request import urlopen
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -160,6 +161,26 @@ def _fetch_subtitles(url: str, url_type: str) -> Optional[str]:
     return _fetch_ytdlp_subs(url)
 
 
+def _fetch_video_metadata_text(url: str) -> Optional[str]:
+    if detect_url_type(url) != "youtube":
+        return None
+    try:
+        endpoint = "https://www.youtube.com/oembed?format=json&url=" + quote(url, safe="")
+        with urlopen(endpoint, timeout=8) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        title = str(data.get("title", "")).strip()
+        author = str(data.get("author_name", "")).strip()
+        if not title:
+            return None
+        return (
+            f"Titolo video: {title}. "
+            f"Creator: {author or 'creator YouTube'}. "
+            "Nota: YouTube ha bloccato sottotitoli/audio dal server, quindi questa analisi ricrea lo script usando i metadata pubblici del video."
+        )
+    except Exception:
+        return None
+
+
 # ── Google Drive fallback: download + Whisper ─────────────────────────────────
 
 def _download_drive(file_id: str, dest: Path) -> bool:
@@ -220,21 +241,28 @@ def _transcribe(audio: Path) -> str:
     if not GROQ_KEY:
         raise RuntimeError("GROQ_API_KEY mancante: serve una chiave Groq valida per trascrivere video senza sottotitoli.")
     from groq import Groq
-    try:
-        client = Groq(api_key=GROQ_KEY)
+    client = Groq(api_key=GROQ_KEY)
+    last_error = None
+    for attempt in range(3):
         with open(audio, "rb") as f:
-            result = client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo",
-                file=("audio.wav", f, "audio/wav"),
-                language="it",
-                response_format="text",
-            )
-        return str(result).strip()
-    except Exception as exc:
-        message = str(exc)
-        if "invalid_api_key" in message.lower() or "invalid api key" in message.lower():
-            raise RuntimeError("GROQ_API_KEY non valida: aggiorna la chiave Groq su Railway per trascrivere video senza sottotitoli.") from exc
-        raise
+            try:
+                result = client.audio.transcriptions.create(
+                    model="whisper-large-v3-turbo",
+                    file=("audio.wav", f, "audio/wav"),
+                    language="it",
+                    response_format="text",
+                )
+                return str(result).strip()
+            except Exception as exc:
+                last_error = exc
+                message = str(exc).lower()
+                if "invalid_api_key" in message or "invalid api key" in message:
+                    raise RuntimeError("GROQ_API_KEY non valida: aggiorna la chiave Groq su Railway per trascrivere video senza sottotitoli.") from exc
+                if any(token in message for token in ["502", "503", "504", "429", "bad gateway", "temporarily"]):
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+    raise RuntimeError(f"Whisper temporaneamente non disponibile dopo 3 tentativi: {last_error}")
 
 
 # ── AI Analysis ───────────────────────────────────────────────────────────────
@@ -300,7 +328,52 @@ def _analyze(transcript: str) -> dict:
         "Chiudi con una call to action semplice e coerente con l'obiettivo del video. "
         "Tono: diretto, naturale, utile, senza sembrare pubblicita forzata."
     )
-    return {"score": score, "commento": commento, "prompt": prompt}
+    viral_script = _build_viral_script(text, words)
+    return {"score": score, "commento": commento, "prompt": prompt, "viral_script": viral_script}
+
+
+def _build_viral_script(text: str, words: list[str]) -> str:
+    clean = text.strip()
+    title_match = re.search(r"Titolo video:\s*(.+?)(?:\.\s*Creator:|$)", clean)
+    if title_match:
+        title = title_match.group(1).strip()
+        return (
+            "HOOK (0-3s)\n"
+            f"Fermo: vuoi vedere cosa succede quando {title}?\n\n"
+            "SCENA 1 (3-8s)\n"
+            "Inquadra subito il momento piu forte. Niente intro lunga. Solo tensione, sorpresa e risultato visibile.\n\n"
+            "SCENA 2 (8-18s)\n"
+            "Spiega in una frase cosa sta succedendo: tre prodotti, una scelta rapida, una reazione immediata.\n\n"
+            "SCENA 3 (18-35s)\n"
+            "Aggiungi ritmo: primo dettaglio, secondo dettaglio, prezzo/valore percepito, reazione finale.\n\n"
+            "CHIUSURA (35-45s)\n"
+            "La parte che fa commentare e questa: chiederesti anche tu lo stesso affare o avresti aspettato?\n\n"
+            "CTA\n"
+            "Scrivilo nei commenti e salva il video se vuoi vedere altri colpi cosi."
+        )
+    first_sentence = next((s.strip() for s in re.split(r"[.!?]+", clean) if s.strip()), clean[:160]).strip()
+    first_sentence = first_sentence[:180]
+    if len(first_sentence) < 20:
+        first_sentence = "questa idea"
+    topic = first_sentence[0].lower() + first_sentence[1:] if first_sentence else "questa idea"
+    keywords = [w for w in words if len(w) > 4 and w not in {
+        "questo", "questa", "video", "della", "delle", "degli", "sono", "come", "perche", "perché", "anche", "molto"
+    }]
+    focus = ", ".join(dict.fromkeys(keywords[:3])) or "risultato, chiarezza, attenzione"
+    return (
+        "HOOK (0-3s)\n"
+        f"Se stai ignorando {topic}, stai probabilmente perdendo l'attenzione nei primi 3 secondi.\n\n"
+        "SVILUPPO (3-20s)\n"
+        "Il punto non e dire piu cose. Il punto e far capire subito perche vale la pena restare.\n"
+        f"Parti da una promessa concreta: cosa cambia per chi guarda? Poi mostra un esempio legato a {focus}.\n\n"
+        "VALORE (20-40s)\n"
+        "Fai vedere il prima e dopo: prima confusione, dopo una soluzione semplice da applicare subito.\n"
+        "Usa frasi brevi. Una sola idea per frase. Ogni frase deve portare avanti il video.\n\n"
+        "CHIUSURA (40-55s)\n"
+        "Se vuoi renderlo piu forte, riscrivi l'apertura con una promessa precisa e taglia tutto quello che non serve.\n\n"
+        "CTA\n"
+        "Salva questo video e usalo come schema per il tuo prossimo contenuto."
+    )
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -371,6 +444,19 @@ async def analyze_url_stream(url: str, url_type: str) -> AsyncGenerator[str, Non
             yield evt("download", f"Nessun sottotitolo trovato. Scaricando l'audio da {pname}...")
             ok, download_error = await run_sync(_download_social_audio, url, audio)
             if not ok:
+                metadata_text = await run_sync(_fetch_video_metadata_text, url)
+                if metadata_text:
+                    word_count = len(metadata_text.split())
+                    yield evt("analyze", "YouTube blocca audio/sottotitoli. Creo uno script virale dai metadata pubblici...")
+                    try:
+                        analysis = await run_sync(_analyze, metadata_text)
+                    except Exception as e:
+                        yield evt("error", f"Errore analisi: {e}")
+                        return
+                    yield evt("done", "Script virale creato dai metadata!", {
+                        "transcript": metadata_text, "word_count": word_count, **analysis
+                    })
+                    return
                 yield evt("error",
                     f"Non riesco a scaricare l'audio da {pname}. "
                     f"Dettaglio: {download_error or 'errore sconosciuto'}. "
@@ -588,8 +674,10 @@ main { flex:1; display:flex; flex-direction:column; align-items:center; padding:
 .two-col { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1rem; }
 @media(max-width:580px){.two-col{grid-template-columns:1fr}}
 .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:1.4rem 1.5rem; }
+.card.full { margin-bottom:1rem; }
 .card-eyebrow { font-size:.68rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin-bottom:.7rem; }
 .card-body { font-size:.9rem; line-height:1.75; color:#cbd5e1; }
+.viral-script { white-space:pre-wrap; color:#e2e8f0; }
 .transcript-wrap { background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden; margin-bottom:1.25rem; }
 .transcript-toggle { width:100%; display:flex; align-items:center; justify-content:space-between; padding:1.1rem 1.5rem; cursor:pointer; background:transparent; border:none; color:var(--text); font-family:'Inter',sans-serif; font-size:.88rem; font-weight:600; text-align:left; transition:background .15s; }
 .transcript-toggle:hover { background:var(--surface2); }
@@ -731,6 +819,10 @@ footer { text-align:center; padding:1.4rem; font-size:.74rem; color:#374151; bor
         <div class="card-eyebrow">🚀 Prompt di Miglioramento</div>
         <div class="card-body" id="res-prompt"></div>
       </div>
+    </div>
+    <div class="card full">
+      <div class="card-eyebrow">🔥 Script 10x più virale</div>
+      <div class="card-body viral-script" id="res-viral-script"></div>
     </div>
     <div class="transcript-wrap" id="transcript-wrap">
       <button class="transcript-toggle" onclick="toggleTranscript()">
@@ -946,7 +1038,7 @@ function handleEvent({step,message,data}){
   if(STEP_IDS[step]) activateStep(step);
 }
 
-function showResults({score,commento,prompt,transcript,word_count}){
+function showResults({score,commento,prompt,viral_script,transcript,word_count}){
   const color=scoreColor(score);
   $('res-score').textContent=score; $('res-stars').textContent=buildStars(score);
   $('res-words').textContent=word_count.toLocaleString('it-IT');
@@ -954,6 +1046,7 @@ function showResults({score,commento,prompt,transcript,word_count}){
   $('score-card').style.borderColor=color+'44';
   $('score-glow').style.background=color;
   $('res-commento').textContent=commento; $('res-prompt').textContent=prompt;
+  $('res-viral-script').textContent=viral_script || '';
   $('res-transcript').textContent=transcript;
   $('progress-section').hidden=true; $('results-section').hidden=false;
 }
@@ -966,15 +1059,15 @@ function toggleTranscript(){ $('transcript-wrap').classList.toggle('open'); }
 
 function copyText(){
   if(!resultData)return;
-  const{score,commento,prompt,transcript}=resultData;
+  const{score,commento,prompt,viral_script,transcript}=resultData;
   navigator.clipboard.writeText(
-    ['GoesToYou.video — Analisi AI','='.repeat(40),'','VOTO: '+score+'/10','','COMMENTO',commento,'','PROMPT DI MIGLIORAMENTO',prompt,'','TESTO ANALIZZATO',transcript].join('\\n')
+    ['GoesToYou.video — Analisi AI','='.repeat(40),'','VOTO: '+score+'/10','','COMMENTO',commento,'','PROMPT DI MIGLIORAMENTO',prompt,'','SCRIPT 10X PIU VIRALE',viral_script || '','', 'TESTO ANALIZZATO',transcript].join('\\n')
   ).then(()=>{const b=event.target;b.textContent='✓ Copiato!';setTimeout(()=>b.textContent='📋 Copia testo',2200);});
 }
 
 function exportPDF(){
   if(!resultData||!window.jspdf)return;
-  const{score,commento,prompt,transcript,word_count}=resultData;
+  const{score,commento,prompt,viral_script,transcript,word_count}=resultData;
   const{jsPDF}=window.jspdf,doc=new jsPDF();
   const W=doc.internal.pageSize.getWidth();let y=22;
   const w=(text,o={})=>{const{size=11,bold=false,color=[30,30,30]}=o;doc.setFontSize(size);doc.setFont('helvetica',bold?'bold':'normal');doc.setTextColor(...color);doc.splitTextToSize(String(text),W-40).forEach(l=>{if(y>272){doc.addPage();y=22;}doc.text(l,20,y);y+=size*.52+1.8;});y+=3;};
@@ -983,6 +1076,7 @@ function exportPDF(){
   y+=4;w('Voto: '+score+'/10  ('+word_count+' parole)',{size:16,bold:true});y+=3;
   w('COMMENTO',{size:8,bold:true,color:[100,100,100]});w(commento);y+=2;
   w('PROMPT DI MIGLIORAMENTO',{size:8,bold:true,color:[100,100,100]});w(prompt);y+=2;
+  w('SCRIPT 10X PIU VIRALE',{size:8,bold:true,color:[100,100,100]});w(viral_script || '');y+=2;
   w('TESTO ANALIZZATO',{size:8,bold:true,color:[100,100,100]});w(transcript,{size:10,color:[70,70,70]});
   doc.save('analisi-video-'+new Date().toISOString().slice(0,10)+'.pdf');
 }
